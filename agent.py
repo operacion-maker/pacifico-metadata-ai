@@ -368,57 +368,21 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
     ```
     """
 
-    def predict(self, context, model_input: dict[str, Any]) -> Generator[str, None, None]:
-        """
-        Process a metadata governance request via Databricks Model Serving.
-        Supports streaming responses.
+    def predict(self, context, model_input) -> list[str]:
+        return list(self.predict_stream(context, model_input))
 
-        Parameters
-        ----------
-        context : mlflow.pyfunc.PythonModelContext
-            The MLflow context.
-        model_input : dict
-            Must contain ``messages`` (list of OpenAI-like messages) and
-            optionally ``custom_inputs`` (thread_id, decision, feedback).
-
-        Returns
-        -------
-        Generator[str, None, None]
-            Streaming response of markdown chunks.
-        """
-        # Parse inputs
-        messages = model_input.get("messages", [])
-        custom_inputs = model_input.get("custom_inputs", {})
+    def predict_stream(self, context, model_input) -> Generator[str, None, None]:
+        import pandas as pd
         
-        thread_id = custom_inputs.get("thread_id")
-        decision = custom_inputs.get("decision")
-        feedback = custom_inputs.get("feedback")
+        # 1. Transformar el DataFrame inyectado por MLflow de vuelta a diccionario
+        if isinstance(model_input, pd.DataFrame):
+            # Extrae la primera fila y la convierte en un dict normal
+            model_input = model_input.to_dict(orient="records")[0]
+        elif isinstance(model_input, list) and len(model_input) > 0:
+            # Soporte por si Databricks inyecta una lista de inputs
+            model_input = model_input[0]
 
-        # Resume flow
-        if thread_id and decision:
-            yield from self._resume_stream(thread_id, decision, feedback)
-            return
-
-        # Initial flow: Extract FQN from the last user message
-        if not messages:
-            yield "Error: No messages provided."
-            return
-            
-        last_message = messages[-1]
-        fqn = last_message.get("content", "").strip()
-        
-        if not fqn:
-            yield "Error: No FQN provided in the last message."
-            return
-            
-        yield from self._run_stream(fqn, thread_id)
-
-    def predict_stream(self, context, model_input: dict[str, Any]) -> Generator[str, None, None]:
-        """
-        Punto de entrada para Databricks Model Serving Streaming.
-        Emite la respuesta paso a paso.
-        """
-        # Parse inputs
+        # Parse inputs (ahora model_input es 100% un dict de Python)
         messages = model_input.get("messages", [])
         custom_inputs = model_input.get("custom_inputs", {})
         
