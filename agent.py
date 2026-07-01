@@ -65,27 +65,53 @@ def _get_graph():
     """
     Get or create the compiled graph (singleton).
 
-    Uses ``MemorySaver`` as checkpointer so that ``interrupt()`` in the
+    Uses ``RedisSaver`` as checkpointer so that ``interrupt()`` in the
     ``human_review`` node can persist state and resume later via
-    ``resume_with_feedback()``.  MemorySaver keeps state in process
-    memory — perfect for interactive Databricks notebooks where the
-    kernel stays alive between cells.
+    ``resume_with_feedback()`` across stateless Model Serving invocations.
     """
     global _GRAPH, _CHECKPOINTER
     if _GRAPH is None:
-        from langgraph.checkpoint.memory import MemorySaver
+        import os
+        from langgraph.checkpoint.redis import RedisSaver
+        from redis import Redis
 
-        _CHECKPOINTER = MemorySaver()
+        # Azure Cache for Redis connection
+        # Read from environment variables (use dotenv for local development)
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        host = os.environ.get("REDIS_HOST")
+        port = int(os.environ.get("REDIS_PORT", 6380))
+        password = os.environ.get("REDIS_PASSWORD")
+        
+        if not host or not password:
+            print("⚠️ Faltan credenciales de Redis en variables de entorno. Usando MemorySaver.")
+            from langgraph.checkpoint.memory import MemorySaver
+            _CHECKPOINTER = MemorySaver()
+            _GRAPH = build_graph(checkpointer=_CHECKPOINTER)
+            return _GRAPH
+
+        try:
+            conn = Redis(
+                host=host,
+                port=port,
+                password=password,
+                ssl=True,
+                decode_responses=False # Checkpointers usually need bytes
+            )
+            _CHECKPOINTER = RedisSaver(conn)
+            print(f"🔗 Conectado a Redis Checkpointer en {host}:{port}")
+        except Exception as e:
+            print(f"⚠️ Error conectando a Redis: {e}. Usando MemorySaver como fallback.")
+            from langgraph.checkpoint.memory import MemorySaver
+            _CHECKPOINTER = MemorySaver()
+
         _GRAPH = build_graph(checkpointer=_CHECKPOINTER)
     return _GRAPH
-
 
 def reset_graph():
     """
     Force re-creation of the graph on next call to ``_get_graph()``.
-
-    Useful after code changes or when you want a fresh MemorySaver
-    (clears all stored thread states).
     """
     global _GRAPH, _CHECKPOINTER
     _GRAPH = None
