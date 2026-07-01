@@ -138,8 +138,8 @@ def get_column_tags(fqn: str) -> list[dict[str, Any]]:
     query = f"""
         SELECT nombre_columna, tag_clave, tag_valor
         FROM {SETTINGS.UC_COLUMNAS_TAGS}
-        WHERE nombre_catalog  = '{catalog}'
-          AND nombre_esquema  = '{schema}'
+        WHERE nombreuc_nivel_uno  = '{catalog}' 
+          AND nombreuc_nivel_dos  = '{schema}' 
           AND nombre_tabla    = '{table}'
     """
     try:

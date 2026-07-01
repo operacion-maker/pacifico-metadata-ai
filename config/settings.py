@@ -14,7 +14,7 @@ class Settings:
 
     # ── LLM Model ──────────────────────────────────────────────────────
     # Primary model (cost-efficient for MVP)
-    LLM_MODEL: str = "databricks-meta-llama-3-1-8b-instruct"
+    LLM_MODEL: str = "databricks-meta-llama-3-3-70b-instruct"
     # Future upgrade path
     LLM_MODEL_UPGRADE: str = "databricks-gemma-3-12b"
     LLM_TEMPERATURE: float = 0.1
