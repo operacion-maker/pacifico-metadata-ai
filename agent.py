@@ -413,6 +413,38 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
             
         yield from self._run_stream(fqn, thread_id)
 
+    def predict_stream(self, context, model_input: dict[str, Any]) -> Generator[str, None, None]:
+        """
+        Punto de entrada para Databricks Model Serving Streaming.
+        Emite la respuesta paso a paso.
+        """
+        # Parse inputs
+        messages = model_input.get("messages", [])
+        custom_inputs = model_input.get("custom_inputs", {})
+        
+        thread_id = custom_inputs.get("thread_id")
+        decision = custom_inputs.get("decision")
+        feedback = custom_inputs.get("feedback")
+
+        # Resume flow
+        if thread_id and decision:
+            yield from self._resume_stream(thread_id, decision, feedback)
+            return
+
+        # Initial flow: Extract FQN from the last user message
+        if not messages:
+            yield "Error: No messages provided."
+            return
+            
+        last_message = messages[-1]
+        fqn = last_message.get("content", "").strip()
+        
+        if not fqn:
+            yield "Error: No FQN provided in the last message."
+            return
+            
+        yield from self._run_stream(fqn, thread_id)
+
     def _run_stream(self, fqn: str, thread_id: str | None = None) -> Generator[str, None, None]:
         """Stream the metadata governance workflow for a given table."""
         from langgraph.types import Command
@@ -508,3 +540,4 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
         else:
             yield f"```json:metabuilder-pipeline\n{{\n  \"currentStep\": \"completed\"\n}}\n```\n\n"
 
+mlflow.models.set_model(MetadataGovernanceAgent())
