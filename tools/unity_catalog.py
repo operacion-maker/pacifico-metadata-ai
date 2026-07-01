@@ -1,14 +1,7 @@
 """
 Unity Catalog Tools — read/write metadata against Databricks UC.
-
-These functions are designed to run **inside a Databricks notebook**
-where ``spark`` is available in the global scope.  For local testing,
-callers must inject a mock ``spark`` session.
-
-All functions are decorated with ``@mlflow.trace`` so that every call
-is captured in the MLflow trace viewer.
+Adaptado para Serverless Model Serving utilizando Databricks SQL Warehouses.
 """
-
 from __future__ import annotations
 
 import json
@@ -20,47 +13,75 @@ from config.settings import SETTINGS
 
 logger = logging.getLogger(__name__)
 
-
-def _get_spark():
-    """Retrieve the active SparkSession (Databricks notebook context)."""
+def _get_execution_context():
+    """
+    Retorna una sesión de Spark (si corres interactivamente en un Notebook)
+    o una conexión Databricks SQL (si corre en un Endpoint de Model Serving).
+    """
     try:
         from pyspark.sql import SparkSession
-        return SparkSession.getActiveSession()
+        spark = SparkSession.getActiveSession()
+        if spark is not None:
+            return ("spark", spark)
     except ImportError:
+        pass
+        
+    # Conexión al SQL Warehouse (Endpoint)
+    import os
+    from databricks import sql
+
+    host = os.getenv("DATABRICKS_HOST")
+    token = os.getenv("DATABRICKS_TOKEN")
+    warehouse_id = os.getenv("DATABRICKS_SQL_WAREHOUSE_ID")
+
+    if not all([host, token, warehouse_id]):
         raise RuntimeError(
-            "PySpark is not available. "
-            "This tool must run inside a Databricks cluster."
+            "Faltan variables de entorno. Define DATABRICKS_HOST, DATABRICKS_TOKEN y DATABRICKS_SQL_WAREHOUSE_ID."
         )
 
+    server_hostname = host.replace("https://", "").replace("http://", "").rstrip("/")
+    http_path = f"/sql/1.0/warehouses/{warehouse_id}"
+
+    conn = sql.connect(
+        server_hostname=server_hostname,
+        http_path=http_path,
+        access_token=token
+    )
+    return ("sql", conn)
+
+def _run_query(query: str, fetch_all=True):
+    """Helper para ejecutar comandos SQL únicos abstraídos del contexto."""
+    ctx_type, ctx = _get_execution_context()
+    try:
+        if ctx_type == "spark":
+            df = ctx.sql(query)
+            if not fetch_all:
+                row = df.first()
+                return row.asDict() if row else None
+            return [row.asDict() for row in df.collect()]
+        else:
+            with ctx.cursor() as cursor:
+                cursor.execute(query)
+                if cursor.description is None:
+                    return None
+                columns = [desc[0] for desc in cursor.description]
+                if not fetch_all:
+                    row = cursor.fetchone()
+                    return dict(zip(columns, row)) if row else None
+                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    finally:
+        if ctx_type == "sql":
+            ctx.close()
 
 # ── READ TOOLS ────────────────────────────────────────────────────────
 
-
 @mlflow.trace(name="tool.get_table_info")
 def get_table_info(fqn: str) -> dict[str, Any]:
-    """
-    Fetch table-level metadata from Unity Catalog.
-
-    Uses the Databricks SDK ``WorkspaceClient().tables.get()`` to retrieve
-    table info including columns, data types, and existing comments.
-
-    Parameters
-    ----------
-    fqn : str
-        Fully-qualified table name: ``catalog.schema.table``.
-
-    Returns
-    -------
-    dict
-        Keys: table_name, catalog, schema, table_type, comment,
-              columns (list of dicts with name, type, comment, nullable).
-    """
     try:
         from databricks.sdk import WorkspaceClient
-
         w = WorkspaceClient()
         ti = w.tables.get(full_name=fqn)
-
+        
         columns = []
         if ti.columns:
             for col in ti.columns:
@@ -82,69 +103,33 @@ def get_table_info(fqn: str) -> dict[str, Any]:
             "columns": columns,
             "created_at": str(ti.created_at) if ti.created_at else None,
             "updated_at": str(ti.updated_at) if ti.updated_at else None,
-            "data_source_format": (
-                str(ti.data_source_format) if ti.data_source_format else None
-            ),
+            "data_source_format": str(ti.data_source_format) if ti.data_source_format else None,
         }
     except Exception as e:
         logger.error("get_table_info failed for %s: %s", fqn, e)
         raise
 
-
 @mlflow.trace(name="tool.get_column_details")
 def get_column_details(fqn: str) -> list[dict[str, Any]]:
-    """
-    Get detailed column metadata via ``DESCRIBE TABLE EXTENDED``.
-
-    Parameters
-    ----------
-    fqn : str
-        Fully-qualified table name.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has keys: col_name, data_type, comment.
-    """
-    spark = _get_spark()
-    rows = spark.sql(f"DESCRIBE TABLE EXTENDED {fqn}").collect()
-
+    rows = _run_query(f"DESCRIBE TABLE EXTENDED {fqn}")
+    
     columns = []
     for row in rows:
-        name = row["col_name"]
-        
-        # Stop completely when we reach the metadata sections
+        name = row.get("col_name")
         if name and (name.startswith("#") or name == "Detailed Table Information"):
             break
-            
         if not name or name.strip() == "" or name.startswith("--"):
             continue
             
         columns.append({
             "col_name": name,
-            "data_type": row["data_type"],
-            "comment": row["comment"] if "comment" in row.asDict() else "",
+            "data_type": row.get("data_type", ""),
+            "comment": row.get("comment", ""),
         })
-
     return columns
-
 
 @mlflow.trace(name="tool.get_column_tags")
 def get_column_tags(fqn: str) -> list[dict[str, Any]]:
-    """
-    Retrieve column-level tags (e.g. DAC, EDC) from the governance layer.
-
-    Parameters
-    ----------
-    fqn : str
-        Fully-qualified table name.
-
-    Returns
-    -------
-    list[dict]
-        Each dict: nombre_columna, tag_clave, tag_valor.
-    """
-    spark = _get_spark()
     parts = fqn.split(".")
     if len(parts) != 3:
         return []
@@ -158,191 +143,119 @@ def get_column_tags(fqn: str) -> list[dict[str, Any]]:
           AND nombre_tabla    = '{table}'
     """
     try:
-        rows = spark.sql(query).collect()
-        return [row.asDict() for row in rows]
+        return _run_query(query)
     except Exception as e:
         logger.warning("get_column_tags failed for %s: %s", fqn, e)
         return []
 
-
 @mlflow.trace(name="tool.get_lineage")
-def get_lineage(
-    table_name: str,
-    module_name: str = "Silver",
-    direction: str = "UP",
-) -> list[dict[str, Any]]:
-    """
-    Get lineage information using the lakehouse lineage function.
-
-    Parameters
-    ----------
-    table_name : str
-        Short table name (not FQN).
-    module_name : str
-        Layer/module: ``Silver``, ``Gold``, etc.
-    direction : str
-        ``UP`` for upstream, ``DOWN`` for downstream.
-
-    Returns
-    -------
-    list[dict]
-        Each dict: trg_name, module_name, domain_name, squad_name, level.
-    """
-    spark = _get_spark()
-    query = f"""
-        SELECT *
-        FROM {SETTINGS.UC_LINEAGE_FUNCTION}(
-            '{table_name}', '{module_name}', '{direction}'
-        )
-    """
+def get_lineage(table_name: str, module_name: str = "Silver", direction: str = "UP") -> list[dict[str, Any]]:
+    query = f"SELECT * FROM {SETTINGS.UC_LINEAGE_FUNCTION}('{table_name}', '{module_name}', '{direction}')"
     try:
-        rows = spark.sql(query).collect()
-        return [row.asDict() for row in rows]
+        return _run_query(query)
     except Exception as e:
         logger.warning("get_lineage failed for %s: %s", table_name, e)
         return []
 
-
 @mlflow.trace(name="tool.get_profiling_summary")
 def get_profiling_summary(fqn: str) -> dict[str, Any]:
-    """
-    Generate a basic profiling summary for a table.
-
-    Computes per-column: count, nulls, distinct count, and sample values.
-    Designed to run efficiently on large tables by sampling.
-
-    Parameters
-    ----------
-    fqn : str
-        Fully-qualified table name.
-
-    Returns
-    -------
-    dict
-        Keys: row_count, column_profiles (list of dicts per column).
-    """
-    spark = _get_spark()
     sample_n = SETTINGS.PROFILING_SAMPLE_ROWS
-
+    ctx_type, ctx = _get_execution_context()
+    
     try:
-        # Total count
-        total_count = spark.sql(f"SELECT COUNT(*) AS cnt FROM {fqn}").first()["cnt"]
+        if ctx_type == "spark":
+            # Ejecución nativa por PySpark (Testing local en Notebooks)
+            total_count = ctx.sql(f"SELECT COUNT(*) AS cnt FROM {fqn}").first()["cnt"]
+            sample_df = ctx.sql(f"SELECT * FROM {fqn} LIMIT {sample_n}")
+            columns_info = sample_df.dtypes
+            
+            profiles = []
+            for col_name, col_type in columns_info:
+                if col_name in ("codapp", "feccargainfo", "periododia"):
+                    continue
 
-        # Sample the table
-        sample_df = spark.sql(f"SELECT * FROM {fqn} LIMIT {sample_n}")
-        columns_info = sample_df.dtypes  # list of (name, dtype)
+                stats = sample_df.selectExpr(
+                    f"COUNT(`{col_name}`) AS non_null",
+                    f"SUM(CASE WHEN `{col_name}` IS NULL THEN 1 ELSE 0 END) AS null_count",
+                    f"COUNT(DISTINCT `{col_name}`) AS distinct_count",
+                ).first()
 
-        profiles = []
-        for col_name, col_type in columns_info:
-            # Skip technical audit columns for brevity
-            if col_name in ("codapp", "feccargainfo", "periododia"):
-                continue
-
-            stats = sample_df.selectExpr(
-                f"COUNT(`{col_name}`) AS non_null",
-                f"SUM(CASE WHEN `{col_name}` IS NULL THEN 1 ELSE 0 END) AS null_count",
-                f"COUNT(DISTINCT `{col_name}`) AS distinct_count",
-            ).first()
-
-            # Grab a few sample values (up to 5)
-            sample_vals = (
-                sample_df
-                .select(col_name)
-                .where(f"`{col_name}` IS NOT NULL")
-                .distinct()
-                .limit(5)
-                .collect()
-            )
-            sample_values = [str(r[0]) for r in sample_vals]
-
-            profiles.append({
-                "column": col_name,
-                "type": col_type,
-                "non_null": int(stats["non_null"]),
-                "null_count": int(stats["null_count"]),
-                "null_pct": round(
-                    stats["null_count"] / sample_n * 100 if sample_n else 0, 1
-                ),
-                "distinct_count": int(stats["distinct_count"]),
-                "sample_values": sample_values,
-            })
+                sample_vals = sample_df.select(col_name).where(f"`{col_name}` IS NOT NULL").distinct().limit(5).collect()
+                
+                profiles.append({
+                    "column": col_name,
+                    "type": col_type,
+                    "non_null": int(stats["non_null"]),
+                    "null_count": int(stats["null_count"]),
+                    "null_pct": round(stats["null_count"] / sample_n * 100 if sample_n else 0, 1),
+                    "distinct_count": int(stats["distinct_count"]),
+                    "sample_values": [str(r[0]) for r in sample_vals],
+                })
+        else:
+            # Ejecución por SQL Warehouse vía API DBAPI (Model Serving Endpoint)
+            from databricks.sdk import WorkspaceClient
+            w = WorkspaceClient()
+            ti = w.tables.get(full_name=fqn)
+            
+            with ctx.cursor() as cursor:
+                cursor.execute(f"SELECT COUNT(*) FROM {fqn}")
+                total_count = cursor.fetchone()[0]
+                
+                profiles = []
+                for col in ti.columns:
+                    col_name = col.name
+                    if col_name in ("codapp", "feccargainfo", "periododia"): 
+                        continue
+                    
+                    # Generación de métricas con sentencias SQL puras
+                    cursor.execute(f"SELECT COUNT(`{col_name}`), SUM(CASE WHEN `{col_name}` IS NULL THEN 1 ELSE 0 END), COUNT(DISTINCT `{col_name}`) FROM (SELECT `{col_name}` FROM {fqn} LIMIT {sample_n})")
+                    stats_row = cursor.fetchone()
+                    
+                    cursor.execute(f"SELECT DISTINCT `{col_name}` FROM (SELECT `{col_name}` FROM {fqn} LIMIT {sample_n}) WHERE `{col_name}` IS NOT NULL LIMIT 5")
+                    sample_vals = [str(r[0]) for r in cursor.fetchall()]
+                    
+                    profiles.append({
+                        "column": col_name,
+                        "type": str(col.type_text),
+                        "non_null": int(stats_row[0]) if stats_row[0] else 0,
+                        "null_count": int(stats_row[1]) if stats_row[1] else 0,
+                        "null_pct": round(int(stats_row[1]) / sample_n * 100 if stats_row[1] and sample_n else 0, 1),
+                        "distinct_count": int(stats_row[2]) if stats_row[2] else 0,
+                        "sample_values": sample_vals,
+                    })
 
         return {
             "row_count": int(total_count),
             "sample_size": sample_n,
             "column_profiles": profiles,
         }
-
     except Exception as e:
         logger.warning("get_profiling_summary failed for %s: %s", fqn, e)
         return {"row_count": 0, "sample_size": 0, "column_profiles": []}
-
+    finally:
+        if ctx_type == "sql":
+            ctx.close()
 
 # ── WRITE TOOLS ───────────────────────────────────────────────────────
 
-
 @mlflow.trace(name="tool.publish_table_comment")
 def publish_table_comment(fqn: str, comment: str) -> dict[str, Any]:
-    """
-    Set or update the table-level comment in Unity Catalog.
-
-    Uses ``COMMENT ON TABLE`` SQL.
-
-    Parameters
-    ----------
-    fqn : str
-        Fully-qualified table name.
-    comment : str
-        The comment text to publish.
-
-    Returns
-    -------
-    dict
-        Status: ``{"status": "success"}`` or error details.
-    """
-    spark = _get_spark()
     escaped = comment.replace("'", "\\'").replace("\n", " ")
     try:
-        spark.sql(f"COMMENT ON TABLE {fqn} IS '{escaped}'")
+        _run_query(f"COMMENT ON TABLE {fqn} IS '{escaped}'")
         logger.info("Published table comment for %s", fqn)
         return {"status": "success", "fqn": fqn, "type": "table_comment"}
     except Exception as e:
         logger.error("publish_table_comment failed: %s", e)
         return {"status": "error", "error": str(e), "fqn": fqn}
 
-
 @mlflow.trace(name="tool.publish_column_comments")
-def publish_column_comments(
-    fqn: str,
-    comments: dict[str, str],
-) -> dict[str, Any]:
-    """
-    Set or update column-level comments in Unity Catalog.
-
-    Uses ``ALTER TABLE … ALTER COLUMN … COMMENT`` SQL for each column.
-
-    Parameters
-    ----------
-    fqn : str
-        Fully-qualified table name.
-    comments : dict[str, str]
-        Mapping of column_name → comment text.
-
-    Returns
-    -------
-    dict
-        Aggregated result with successes and failures.
-    """
-    spark = _get_spark()
+def publish_column_comments(fqn: str, comments: dict[str, str]) -> dict[str, Any]:
     results = {"successes": [], "failures": []}
-
     for col_name, comment in comments.items():
         escaped = comment.replace("'", "\\'").replace("\n", " ")
         try:
-            spark.sql(
-                f"ALTER TABLE {fqn} ALTER COLUMN `{col_name}` "
-                f"COMMENT '{escaped}'"
-            )
+            _run_query(f"ALTER TABLE {fqn} ALTER COLUMN `{col_name}` COMMENT '{escaped}'")
             results["successes"].append(col_name)
         except Exception as e:
             logger.error("Failed to set comment for %s.%s: %s", fqn, col_name, e)
