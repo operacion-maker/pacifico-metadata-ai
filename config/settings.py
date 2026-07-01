@@ -39,19 +39,19 @@ class Settings:
     # ── Unity Catalog Sources ──────────────────────────────────────────
     # Table with UC object + column metadata
     UC_OBJETOS_COLUMNAS: str = (
-        "ctl_lakehouse_modelamiento_prod"
-        ".sch_ctl_modelamiento_silver_vw"
+        "ctl_lakehouse_modelamiento_desa"
+        ".sch_ctl_modelamiento_silver_tb"
         ".md_objetos_uc_columnas"
     )
     # Table with column tags (DAC, EDC, etc.)
     UC_COLUMNAS_TAGS: str = (
-        "ctl_lakehouse_modelamiento_prod"
-        ".sch_ctl_modelamiento_silver_vw"
+        "ctl_lakehouse_modelamiento_desa"
+        ".sch_ctl_modelamiento_silver_tb"
         ".ud_columnas_tags"
     )
     # Lineage function
     UC_LINEAGE_FUNCTION: str = (
-        "ctl_lakehouse_modelamiento_prod"
+        "ctl_lakehouse_modelamiento_desa"
         ".sch_ctl_modelamiento_gold_fn"
         ".fn_get_specific_lineage_in_lakehouse"
     )
