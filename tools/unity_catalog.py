@@ -140,7 +140,7 @@ def get_column_tags(fqn: str) -> list[dict[str, Any]]:
         FROM {SETTINGS.UC_COLUMNAS_TAGS}
         WHERE nombreuc_nivel_uno  = '{catalog}' 
           AND nombreuc_nivel_dos  = '{schema}' 
-          AND nombre_tabla    = '{table}'
+          AND nombreuc_nivel_tres    = '{table}'
     """
     try:
         return _run_query(query)
