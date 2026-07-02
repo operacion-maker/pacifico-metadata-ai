@@ -373,6 +373,7 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
 
     def predict_stream(self, context, model_input) -> Generator[str, None, None]:
         import pandas as pd
+        import json
         
         # 1. Transformar el DataFrame inyectado por MLflow de vuelta a diccionario
         if isinstance(model_input, pd.DataFrame):
@@ -387,15 +388,15 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
         custom_inputs = model_input.get("custom_inputs", {})
         
         thread_id = custom_inputs.get("thread_id")
-        decision = custom_inputs.get("decision")
-        feedback = custom_inputs.get("feedback")
+        # Contrato B: HITL o Feedback
+        human_feedback = custom_inputs.get("human_feedback")
 
-        # Resume flow
-        if thread_id and decision:
-            yield from self._resume_stream(thread_id, decision, feedback)
+        # Resume flow (Contrato B)
+        if thread_id and human_feedback:
+            yield from self._resume_stream(thread_id, human_feedback)
             return
 
-        # Initial flow: Extract FQN from the last user message
+        # Initial flow (Contrato A): Extract FQN from the last user message
         if not messages:
             yield "Error: No messages provided."
             return
@@ -425,21 +426,28 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
             "loop_count": 0,
             "retry_count": 0,
             "audit_log": [],
-            "quality_findings": [],
-            "governance_findings": [],
         }
 
         yield "Iniciando proceso de documentación inteligente...\n\n"
         
         yield from self._process_events(graph.stream(initial_state, config, stream_mode="updates"), config, tid)
 
-    def _resume_stream(self, thread_id: str, decision: str, feedback: str = "") -> Generator[str, None, None]:
+    def _resume_stream(self, thread_id: str, human_feedback: dict) -> Generator[str, None, None]:
         """Stream the resumption of the graph after HITL interrupt."""
         from langgraph.types import Command
         
         graph = _get_graph()
         config = {"configurable": {"thread_id": thread_id}}
-        resume_value = {"decision": decision, "feedback": feedback}
+        
+        # En el contrato B, la decisión viene implícita si hay feedback o si es aprobacion
+        # Asumiremos que si la UI envía human_feedback (aunque sea vacío para general observations),
+        # y no envía reject explícito, es un rework. O podemos chequear el contenido.
+        decision = "rework"
+        if not human_feedback.get("general_observations") and not human_feedback.get("edited_columns") and not human_feedback.get("edited_table_comment"):
+            # If the user just clicked Approve without edits
+            decision = "approve"
+            
+        resume_value = {"human_decision": decision, "human_feedback": human_feedback}
         
         yield f"Reanudando flujo con decisión: {decision}...\n\n"
         
@@ -447,6 +455,7 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
 
     def _process_events(self, stream_iterator, config, tid: str) -> Generator[str, None, None]:
         """Process events from the graph stream and format them into markdown blocks."""
+        import json
         graph = _get_graph()
         
         for event in stream_iterator:
@@ -457,39 +466,33 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
                 # Emit pipeline progress
                 yield f"```json:metabuilder-pipeline\n{{\n  \"currentStep\": \"{node_name}\"\n}}\n```\n\n"
 
-                # If generate_draft completed, emit draft card
-                if node_name == "generate_draft" and "metadata_draft" in node_output:
-                    draft = node_output["metadata_draft"]
-                    # Format for DraftReviewCard
-                    cols = [{"name": c.get("name", ""), "type": c.get("type", ""), "comment": c.get("comment", "")} for c in draft.get("columns", [])]
+                # Mensajes SSE amistosos para el usuario final
+                if node_name == "collect_context":
+                    yield "⚙️ Extrayendo metadatos técnicos y linaje desde Unity Catalog...\n\n"
+                elif node_name == "generate_draft":
+                    yield "🧠 Consolidando contexto y generando borrador inteligente con criterios de gobierno...\n\n"
+
+                # Si generate_draft completó, emitimos el borrador (Contrato B unificado)
+                if node_name == "generate_draft":
+                    table_comment = node_output.get("draft_table_comment", "")
+                    column_comments = node_output.get("draft_column_comments", {})
+                    gov_ind = node_output.get("governance_indicator", {"status": "warn", "compliance_notes": []})
+                    
+                    # Lo enviamos estructurado
+                    cols_list = []
+                    for c_name, c_desc in column_comments.items():
+                        cols_list.append({
+                            "name": c_name,
+                            "comment": c_desc
+                        })
+                        
                     card_data = {
-                        "tableName": draft.get("table", ""),
-                        "tableComment": draft.get("description", ""),
-                        "columns": cols
+                        "tableName": node_output.get("asset_fqn", "unknown_table"),
+                        "tableComment": table_comment,
+                        "columns": cols_list,
+                        "governance_indicator": gov_ind
                     }
                     yield f"```json:metabuilder-draft\n{json.dumps(card_data)}\n```\n\n"
-
-                # If evaluate_quality completed, emit quality card
-                elif node_name == "evaluate_quality" and "quality_score" in node_output:
-                    card_data = {
-                        "score": node_output["quality_score"],
-                        "pillars": {
-                            "clarity": node_output.get("quality_score", 0.8), # Mock pillars if not detailed
-                            "purpose": node_output.get("quality_score", 0.8),
-                            "detail": node_output.get("quality_score", 0.8),
-                            "context": node_output.get("quality_score", 0.8)
-                        },
-                        "findings": node_output.get("quality_findings", [])
-                    }
-                    yield f"```json:metabuilder-quality\n{json.dumps(card_data)}\n```\n\n"
-
-                # If reflect_governance completed, emit governance card
-                elif node_name == "reflect_governance" and "governance_status" in node_output:
-                    card_data = {
-                        "status": node_output["governance_status"],
-                        "findings": node_output.get("governance_findings", [])
-                    }
-                    yield f"```json:metabuilder-governance\n{json.dumps(card_data)}\n```\n\n"
 
         # Check if paused (HITL)
         try:

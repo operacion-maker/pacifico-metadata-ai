@@ -19,6 +19,13 @@ class AuditEntry(TypedDict, total=False):
     details: dict[str, Any]
 
 
+class HumanFeedback(TypedDict, total=False):
+    """Estructura de feedback del Data Steward (Contrato B)."""
+    general_observations: str
+    edited_table_comment: str
+    edited_columns: dict[str, str]
+
+
 class MetadataAgentState(TypedDict, total=False):
     """
     Full state for the Metadata Governance State Machine.
@@ -45,18 +52,12 @@ class MetadataAgentState(TypedDict, total=False):
     # ── Draft Metadata ─────────────────────────────────────────────────
     draft_table_comment: str
     draft_column_comments: dict[str, str]   # {col_name: comment}
-
-    # ── Quality Evaluation ─────────────────────────────────────────────
-    quality_score: float                    # 0.0 – 1.0 (weighted avg)
-    pillar_scores: dict[str, float]         # {pillar_key: score}
-    quality_findings: Annotated[list[str], operator.add]
-
-    # ── Governance / Compliance ────────────────────────────────────────
-    governance_status: Literal["pass", "fail", "needs_review"]
-    governance_findings: Annotated[list[str], operator.add]
+    
+    # ── Governance Indicator ───────────────────────────────────────────
+    governance_indicator: dict[str, Any]    # {"status": str, "compliance_notes": list[str]}
 
     # ── HITL (Human-In-The-Loop) ───────────────────────────────────────
-    human_feedback: str | None
+    human_feedback: HumanFeedback | None
     human_decision: Literal["approve", "reject", "rework"] | None
 
     # ── Operational Control ────────────────────────────────────────────

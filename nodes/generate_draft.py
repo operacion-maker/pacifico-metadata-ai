@@ -91,7 +91,7 @@ def _parse_json_response(text: str) -> dict[str, Any]:
 
     # Strategy 5: Fallback — return structure with raw text
     logger.warning("Could not parse JSON from LLM response (%d chars). Using raw text as table_comment.", len(text))
-    return {"table_comment": text, "column_comments": {}}
+    return {"table_comment": text, "column_comments": {}, "governance_indicator": {"status": "warn", "compliance_notes": ["Error parsing response"]}}
 
 
 @mlflow.trace(name="node.generate_draft")
@@ -100,8 +100,8 @@ def generate_draft(state: MetadataAgentState) -> dict[str, Any]:
     Generate metadata draft using LLM.
 
     This is a **cognitive** node — calls the LLM with evidence context.
-    On rework iterations, includes previous quality findings and/or
-    human feedback to guide improvements.
+    On rework iterations, includes human feedback to guide improvements
+    (Prompt Anchoring).
     """
     system_prompt, user_prompt = build_draft_prompt(
         table_info=state["table_info"],
@@ -109,7 +109,6 @@ def generate_draft(state: MetadataAgentState) -> dict[str, Any]:
         profiling_summary=state.get("profiling_summary"),
         lineage_info=state.get("lineage_info"),
         column_tags=state.get("column_tags"),
-        quality_findings=state.get("quality_findings"),
         human_feedback=state.get("human_feedback"),
     )
 
@@ -119,16 +118,19 @@ def generate_draft(state: MetadataAgentState) -> dict[str, Any]:
         parsed = _parse_json_response(raw_response)
         draft_table_comment = parsed.get("table_comment", "")
         draft_column_comments = parsed.get("column_comments", {})
+        governance_indicator = parsed.get("governance_indicator", {"status": "warn", "compliance_notes": []})
     except (json.JSONDecodeError, KeyError) as e:
         logger.error("Failed to parse draft response: %s", e)
         draft_table_comment = raw_response
         draft_column_comments = {}
+        governance_indicator = {"status": "warn", "compliance_notes": [f"Parse error: {str(e)}"]}
 
     loop_count = state.get("loop_count", 0)
 
     return {
         "draft_table_comment": draft_table_comment,
         "draft_column_comments": draft_column_comments,
+        "governance_indicator": governance_indicator,
         "workflow_status": "draft_generated",
         "loop_count": loop_count + 1,
         # Clear previous human feedback after consuming it
@@ -144,7 +146,6 @@ def generate_draft(state: MetadataAgentState) -> dict[str, Any]:
                     "table_comment_length": len(draft_table_comment),
                     "columns_commented": len(draft_column_comments),
                     "model": SETTINGS.LLM_MODEL,
-                    "had_previous_findings": bool(state.get("quality_findings")),
                     "had_human_feedback": bool(state.get("human_feedback")),
                 },
             }

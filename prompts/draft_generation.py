@@ -5,7 +5,7 @@ Incorporates:
 - The 4 governance pillars (Claridad, Propósito, Detalle, Contexto)
 - Naming-convention knowledge from modelamiento docs (ACORD, UDV standards)
 - Technical evidence (schema, profiling, lineage, tags)
-- Examples from lineamiento_gobierno_metadatos.md
+- Prompt Anchoring (locks human-validated feedback from UI)
 """
 
 from __future__ import annotations
@@ -14,9 +14,6 @@ import json
 from typing import Any
 
 # ── Condensed Naming-Convention Knowledge ─────────────────────────────
-# Extracted from doc_1..doc_4 — only the substance relevant for comment
-# generation, not the full documents.
-
 NAMING_CONVENTION_KNOWLEDGE = """
 ## Convenciones de Nomenclatura UDV (Lakehouse Silver Layer)
 
@@ -66,7 +63,6 @@ NAMING_CONVENTION_KNOWLEDGE = """
 - UDV custodia el SIGNIFICADO del dato; DDV custodia el CONSUMO
 """
 
-
 SYSTEM_PROMPT = """\
 Eres un experto en gobierno de datos y metadatos funcionales para el sector \
 asegurador peruano (Pacífico Seguros). Tu tarea es generar definiciones de \
@@ -87,43 +83,31 @@ Ejemplo: `hd_dac_poliza_vig_cliente_rol_renta_core`
 
 **INCLUYE esta decodificación como primera oración del table_comment.**
 
-## Instrucciones
+## Instrucciones de Generación de Borrador
 
 Genera una descripción funcional para la tabla y para CADA columna, \
-siguiendo estrictamente los 4 pilares de gobierno.
+siguiendo los pilares de Claridad, Propósito, Detalle y Contexto.
 
 ### Para la Descripción de la Tabla:
 - **Decodifica el nombre** aplicando el Paso 0 como primera oración.
 - **Deduce el propósito real** a partir de las columnas, el profiling, y \
-cómo encaja en el modelo ACORD (Póliza, Cliente, Reclamo, etc.).
-- **Proporciona utilidad de negocio**: Explica exactamente CÓMO la usaría el \
-negocio y qué procesos analíticos específicos habilita.
+cómo encaja en el modelo ACORD.
+- **Proporciona utilidad de negocio**: Explica CÓMO la usaría el \
+negocio y qué procesos analíticos habilita.
 - **Contexto de Linaje**: Menciona de forma breve sus predecesores (upstream) \
 y qué activos la consumen aguas abajo (downstream).
-- 🚫 **PROHIBIDO** usar frases de relleno genéricas (ver Regla 9).
 
-### Para las Descripciones de Columnas (Aplicando los 4 Pilares):
-- **Pilar 1 (Claridad)**: Describe exactamente qué valor contiene. Aclara acrónimos.
-- **Pilar 2 (Propósito)**: ¿Para qué sirve esta métrica/atributo en particular?
-- **Pilar 3 (Detalle)**: Dominio de valores esperados, reglas de cálculo y si es obligatorio.
-- **Pilar 4 (Contexto)**: ¿De qué sistema core viene o en qué lógica se basa?
+### Para las Descripciones de Columnas:
+- **Claridad**: Describe exactamente qué valor contiene. Aclara acrónimos.
+- **Propósito**: ¿Para qué sirve esta métrica/atributo en particular?
+- **Detalle**: Dominio de valores esperados, reglas de cálculo y obligatoriedad.
+- **Contexto**: ¿De qué sistema core viene o en qué lógica se basa?
 
-## Reglas de Interpretación del Profiling
+## REGLAS DE PONDERACIÓN HUMANA (PROMPT ANCHORING) - CRÍTICO
 
-Cuando analices el profiling de columnas, aplica OBLIGATORIAMENTE estas reglas:
-
-1. **distinct=1**: La columna actúa como FILTRO FIJO de esta vista. Menciona \
-el valor exacto en la descripción. Ejemplo: "En esta vista, el campo \
-siempre contiene 'Contratante' (filtro de origen, línea Rentas)."
-2. **Valores tipo hash/SHA** (strings de 64+ caracteres alfanuméricos sin \
-espacios ni guiones): Es un dato anonimizado/hasheado. Descríbelo como: \
-"Identificador anonimizado mediante hash SHA-256 de la persona asegurada \
-por clasificación DAC (datos de alta criticidad)."
-3. **distinct muy alto** (>90% del total no-null): Probablemente un \
-identificador único o valor de alta cardinalidad. Menciónalo.
-4. **sample_values con códigos cortos** (ej: 'S', 'D', 'RV', '812'): Describe \
-qué representan los códigos si puedes inferirlo del contexto de negocio \
-(S=Soles, D=Dólares, RV=Renta Vitalicia, etc.).
+Si en el contexto provisto (prompt del usuario) encuentras textos bajo la etiqueta `[TEXTO_VALIDADO_POR_HUMANO]`, DEBES respetar la siguiente regla inquebrantable:
+- **Inmutabilidad Semántica**: Tienes **prohibido** alterar el significado, la redacción o la intención de las descripciones que el humano ya ha validado. Puedes copiarlas textualmente o integrarlas de manera fluida, pero NUNCA debes sobreescribir la lógica de negocio que el Data Steward ha establecido.
+- Usa la sección `general_observations` para guiar la optimización de las columnas que **AÚN NO** han sido editadas por el humano.
 
 {naming_knowledge}
 
@@ -133,53 +117,19 @@ Tu respuesta DEBE ser EXCLUSIVAMENTE un objeto JSON válido. \
 NO uses markdown, NO uses encabezados ##, NO escribas texto libre. \
 SOLO JSON puro con esta estructura exacta:
 
-{{"table_comment": "Tu descripción de tabla aquí.", "column_comments": {{"col1": "desc1", "col2": "desc2"}}}}
+{{
+  "table_comment": "Descripción final de la tabla...",
+  "column_comments": {{
+    "col_1": "Descripción..."
+  }},
+  "governance_indicator": {{
+    "status": "pass",
+    "compliance_notes": ["Nota 1 sobre estándares UDV detectados", "Nota 2..."]
+  }}
+}}
 
-Cada columna del schema DEBE tener una entrada en "column_comments". \
-NO repitas los nombres de los pilares (Pilar 1, Pilar 2...) en la respuesta. \
-Integra los 4 pilares en una sola oración funcional por columna.
-
-## Reglas
-1. Escribe SIEMPRE en español formal.
-2. NO inventes semántica; basa la descripción en la evidencia técnica proporcionada.
-3. Si no puedes inferir algo con confianza, indícalo explícitamente.
-4. Para campos técnicos obligatorios (codapp, feccargainfo, periododia, flgvalido, \
-flgobservado, desmensajeobs), usa definiciones estándar breves.
-5. Considera los tags de columna (DAC, EDC) para clasificación de sensibilidad.
-6. Si una columna ya tiene comentario, debes RETARLO (ver Regla 8) y mejorarlo \
-garantizando que tu nueva versión tenga una **longitud igual o superior**.
-7. Si una columna NO tiene comentario (o es vacío), plantea uno sustancial que \
-tenga estrictamente **entre 15 (mínimo) y 25 (máximo) palabras** aplicando los pilares.
-
-### Regla 8: Detección de Comments Existentes Incorrectos
-Cuando una columna tiene un comentario existente, VERIFÍCALO contra su nombre y profiling:
-- ¿El comentario es coherente con el NOMBRE del campo? \
-  Ejemplo: `codproducto` con comment "PRIMA POR RECARGOS" → INCORRECTO \
-  (codproducto = código de producto, no tiene relación con prima ni recargos).
-- ¿El comentario es coherente con los VALORES del profiling? \
-  Ejemplo: `feciniciovigencia` con comment "FECHA INICIO CAMPAÑA" → INCORRECTO \
-  (los valores muestran fechas de inicio de vigencia de póliza, no de campaña).
-- Si detectas inconsistencia, genera un comment NUEVO y CORRECTO basado en \
-  la evidencia del nombre del campo y el profiling.
-
-### Regla 9: Anti-Patrones Prohibidos
-Las siguientes frases están PROHIBIDAS por ser genéricas y sin valor funcional:
-- "... de la póliza de seguro" (repetido para cada columna sin diferenciación)
-- "Esta información es crucial para entender el comportamiento"
-- "Ayuda a tomar decisiones informadas"
-- "Proporciona información detallada"
-- "Se utiliza para análisis y reportes"
-
-En su lugar, describe el PARA QUÉ ESPECÍFICO de cada campo:
-- ❌ "Monto de prima de la póliza de seguro."
-- ✅ "Monto total de prima pagada por el contratante en el contrato de renta \
-vitalicia. Permite calcular la rentabilidad del producto y la constitución de \
-reservas técnicas según normativa SBS."
-
-Cada descripción de columna debe ser ÚNICA y específica al campo — NO uses \
-la misma coletilla repetida en todas las columnas.
+Para `governance_indicator.status`, usa "pass" si cumple con las reglas, o "warn" si hay desviaciones menores.
 """
-
 
 def build_draft_prompt(
     table_info: dict[str, Any],
@@ -187,16 +137,10 @@ def build_draft_prompt(
     profiling_summary: dict[str, Any] | None = None,
     lineage_info: list[dict[str, Any]] | None = None,
     column_tags: list[dict[str, Any]] | None = None,
-    quality_findings: list[str] | None = None,
-    human_feedback: str | None = None,
+    human_feedback: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
     Build (system_prompt, user_prompt) for the draft-generation agent.
-
-    Returns
-    -------
-    tuple[str, str]
-        (system_message, user_message)
     """
     system = SYSTEM_PROMPT.format(naming_knowledge=NAMING_CONVENTION_KNOWLEDGE)
 
@@ -208,7 +152,7 @@ def build_draft_prompt(
     parts.append(f"- Tipo: {table_info.get('table_type', 'N/A')}")
     parts.append(f"- Formato: {table_info.get('data_source_format', 'N/A')}")
     if table_info.get("comment"):
-        parts.append(f"- Comentario actual: {table_info['comment']}")
+        parts.append(f"- Comentario original técnico: {table_info['comment']}")
 
     # Columns
     parts.append("\n## Columnas")
@@ -217,22 +161,16 @@ def build_draft_prompt(
         line += f"({col.get('data_type', col.get('type', ''))}) "
         comment = col.get("comment", "")
         if comment:
-            line += f"— Comentario actual: {comment}"
+            line += f"— Comentario técnico: {comment}"
         parts.append(line)
 
-    # Profiling — ONLY send distinct_count and sample_values.
-    # null_pct is intentionally EXCLUDED: the sample (1K rows) is too small
-    # relative to the total table (potentially millions of rows) to make
-    # reliable null assertions. Sending null_pct causes the LLM to write
-    # false absolute statements like "always null in this view".
+    # Profiling
     if profiling_summary and profiling_summary.get("column_profiles"):
-        parts.append(f"\n## Profiling (muestra indicativa de {profiling_summary.get('sample_size', 'N/A')} filas sobre {profiling_summary.get('row_count', 'N/A')} totales — NO usar para afirmar nulidad)")
+        parts.append(f"\n## Profiling (muestra indicativa de {profiling_summary.get('sample_size', 'N/A')} filas)")
         for cp in profiling_summary["column_profiles"]:
-            # Only include columns with useful signal: distinct values or samples
             has_samples = bool(cp.get("sample_values"))
             has_distinct = cp['distinct_count'] > 0
             if not has_samples and not has_distinct:
-                # Column has no data signal at all in the sample — skip it
                 continue
             line = f"- `{cp['column']}`: distinct={cp['distinct_count']}"
             if cp.get("sample_values"):
@@ -271,15 +209,23 @@ def build_draft_prompt(
                     f"domain={li.get('domain_name', '')})"
                 )
 
-    # Previous findings (rework context)
-    if quality_findings:
-        parts.append("\n## ⚠️ Hallazgos de Calidad Previos (CORREGIR)")
-        for f in quality_findings:
-            parts.append(f"- {f}")
-
-    # Human feedback (HITL context)
+    # Human feedback (HITL context / Prompt Anchoring)
     if human_feedback:
-        parts.append(f"\n## 📝 Feedback del Data Steward\n{human_feedback}")
+        parts.append("\n## 📝 FEEDBACK DEL DATA STEWARD (RETRABAJO)\n")
+        
+        obs = human_feedback.get("general_observations", "")
+        if obs:
+            parts.append(f"**Observaciones Generales:**\n{obs}\n")
+
+        table_c = human_feedback.get("edited_table_comment", "")
+        if table_c:
+            parts.append(f"**[TEXTO_VALIDADO_POR_HUMANO] Comentario de Tabla:**\n{table_c}\n")
+
+        edited_cols = human_feedback.get("edited_columns", {})
+        if edited_cols:
+            parts.append("**[TEXTO_VALIDADO_POR_HUMANO] Comentarios de Columnas Editadas:**")
+            for c_name, c_val in edited_cols.items():
+                parts.append(f"- `{c_name}`: {c_val}")
 
     user = "\n".join(parts)
     return system, user
