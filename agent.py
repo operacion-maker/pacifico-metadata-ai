@@ -52,14 +52,9 @@ from state.schema import MetadataAgentState
 
 logger = logging.getLogger(__name__)
 
-# Autologging removed due to incompatibility with LangChain >= 0.3.0
-# (It causes AttributeError on 'langchain.debug' and crashes the Databricks kernel)
-
-
 # ── Global graph instance (singleton for notebook use) ────────────────
 _GRAPH = None
 _CHECKPOINTER = None
-
 
 def _get_graph():
     """
