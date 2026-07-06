@@ -83,8 +83,23 @@ def human_review(state: MetadataAgentState) -> dict[str, Any]:
         except json.JSONDecodeError:
             human_input = {"decision": "rework", "feedback": human_input}
 
+
     decision = human_input.get("decision", "rework")
-    feedback = human_input.get("feedback", "")
+    feedback = human_input.get("feedback", {})
+
+    # ── Normalise human_feedback.edited_columns ──────────────────────
+    # Portal v2 sends a list of {column_name, comment} deltas.
+    # Legacy / notebook sends a dict {col_name: str}.
+    # We normalise to dict here so the rest of the graph is unaffected.
+    if isinstance(feedback, dict):
+        cols = feedback.get("edited_columns")
+        if isinstance(cols, list):
+            # Convert delta array → dict
+            feedback["edited_columns"] = {
+                c.get("column_name", ""): c.get("comment", "")
+                for c in cols
+                if c.get("column_name")
+            }
 
     # Validate decision
     if decision not in ("approve", "reject", "rework"):
@@ -101,7 +116,10 @@ def human_review(state: MetadataAgentState) -> dict[str, Any]:
                 "action": "steward_reviewed",
                 "details": {
                     "decision": decision,
-                    "feedback_length": len(feedback),
+                    "resource_status": state.get("resource_status", "strict"),
+                    "edited_columns_count": len(
+                        feedback.get("edited_columns", {}) if isinstance(feedback, dict) else {}
+                    ),
                     "quality_score_at_review": state.get("quality_score", 0.0),
                 },
             }

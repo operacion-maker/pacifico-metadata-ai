@@ -21,13 +21,42 @@ def publish_uc(state: MetadataAgentState) -> dict[str, Any]:
     """
     Publish the approved metadata to Unity Catalog.
 
-    Writes:
-    1. Table-level comment via ``COMMENT ON TABLE``.
-    2. Column-level comments via ``ALTER TABLE ALTER COLUMN COMMENT``.
-
-    This is a **deterministic** node — no LLM calls.
+    Behaviour depends on ``resource_status``:
+    - ``"strict"`` (default): Writes table + column comments (existing behaviour).
+    - ``"soft"``: Skips comment publication; instead writes a custom UC tag
+      ``governance_status = "soft_draft"`` to mark the asset as pending review.
     """
     fqn = state["asset_fqn"]
+    resource_status = state.get("resource_status", "strict")
+
+    # ── Soft mode: write tag only ────────────────────────────────────
+    if resource_status == "soft":
+        try:
+            from tools.unity_catalog import set_asset_tag
+            tag_result = set_asset_tag(fqn, "governance_status", "soft_draft")
+            tag_ok = tag_result.get("status") == "success"
+        except Exception as e:
+            logger.warning("set_asset_tag not available or failed: %s", e)
+            tag_ok = False
+
+        workflow_status = "soft_draft_saved" if tag_ok else "soft_draft_saved_no_tag"
+        return {
+            "workflow_status": workflow_status,
+            "audit_log": [
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "node": "publish_uc",
+                    "action": "soft_draft_tagged",
+                    "details": {
+                        "asset_fqn": fqn,
+                        "resource_status": "soft",
+                        "tag_written": tag_ok,
+                    },
+                }
+            ],
+        }
+
+    # ── Strict mode: full publication ────────────────────────────────
     table_comment = state.get("draft_table_comment", "")
     column_comments = state.get("draft_column_comments", {})
 
@@ -69,8 +98,10 @@ def publish_uc(state: MetadataAgentState) -> dict[str, Any]:
                 "details": {
                     **publish_detail,
                     "asset_fqn": fqn,
+                    "resource_status": "strict",
                     "quality_score": state.get("quality_score", 0.0),
                 },
             }
         ],
     }
+

@@ -19,11 +19,19 @@ class AuditEntry(TypedDict, total=False):
     details: dict[str, Any]
 
 
+class EditedColumn(TypedDict, total=False):
+    """Delta entry for a single column edit (Contrato B v2)."""
+    column_name: str
+    comment: str
+
+
 class HumanFeedback(TypedDict, total=False):
     """Estructura de feedback del Data Steward (Contrato B)."""
     general_observations: str
     edited_table_comment: str
-    edited_columns: dict[str, str]
+    # v2 format: list of {column_name, comment} deltas (only changed columns)
+    # Legacy dict format is normalised in human_review.py for backward compat.
+    edited_columns: list[EditedColumn] | dict[str, str]
 
 
 class MetadataAgentState(TypedDict, total=False):
@@ -38,6 +46,11 @@ class MetadataAgentState(TypedDict, total=False):
     # ── Identity ───────────────────────────────────────────────────────
     request_id: str
     asset_fqn: str               # catalog.schema.table
+
+    # ── Governance mode ────────────────────────────────────────────────
+    # "soft"   → write soft_draft tag to UC, no strict publication.
+    # "strict" → (default) full publication pipeline.
+    resource_status: Literal["soft", "strict"] | None
 
     # ── Context / Evidence (populated by collect_context) ──────────────
     table_info: dict[str, Any]          # SDK TableInfo dict

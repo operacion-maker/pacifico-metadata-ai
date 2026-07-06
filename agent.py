@@ -383,6 +383,8 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
         custom_inputs = model_input.get("custom_inputs", {})
         
         thread_id = custom_inputs.get("thread_id")
+        # Governance mode: "soft" = write tag only, "strict" = full publish (default)
+        resource_status = custom_inputs.get("resource_status", "strict")
         # Contrato B: HITL o Feedback
         human_feedback = custom_inputs.get("human_feedback")
 
@@ -403,9 +405,9 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
             yield "Error: No FQN provided in the last message."
             return
             
-        yield from self._run_stream(fqn, thread_id)
+        yield from self._run_stream(fqn, thread_id, resource_status)
 
-    def _run_stream(self, fqn: str, thread_id: str | None = None) -> Generator[str, None, None]:
+    def _run_stream(self, fqn: str, thread_id: str | None = None, resource_status: str = "strict") -> Generator[str, None, None]:
         """Stream the metadata governance workflow for a given table."""
         from langgraph.types import Command
         import uuid
@@ -421,6 +423,7 @@ class MetadataGovernanceAgent(mlflow.pyfunc.PythonModel):
             "loop_count": 0,
             "retry_count": 0,
             "audit_log": [],
+            "resource_status": resource_status,  # propagate governance mode
         }
 
         yield "Iniciando proceso de documentación inteligente...\n\n"
